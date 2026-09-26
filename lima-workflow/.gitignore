@@ -1,0 +1,8 @@
+# Scratches and Misc...
+scratch*
+scratch-*
+
+# For security exclude the working copy of the files
+# Only the example files are commited
+ubuntu24-docker.yaml
+initialize_secrets.sh

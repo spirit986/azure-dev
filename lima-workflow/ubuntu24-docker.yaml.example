@@ -1,0 +1,77 @@
+base:
+  - template:_images/ubuntu-24.04
+  - template:docker
+
+## ---------------------------------------------------------------------------
+## Per-project settings - the only part you normally edit. One VM per project:
+## copy this file to ubuntu24-docker.yaml and set `param` + `user`.
+##
+##   Mac:   ~/Projects/<project>/            shared folder (virtiofs)
+##          ├── <repoDir>/lima-workflow/     this repo; provision scripts are
+##          │                                read from here on every boot
+##          └── ...                          your project's own repos
+##   Guest: /workspaces/<project>/           the same folder inside the VM
+## ---------------------------------------------------------------------------
+
+## `{{.Param.*}}` values are resolved everywhere they're referenced below
+## (mounts, provision scripts), so each is set only here.
+##   project - folder name under ~/Projects on the Mac; also the guest path
+##             /workspaces/<project>
+##   repoDir - folder name of this repo inside that folder
+param:
+  project: "my-project"
+  repoDir: "azure-dev"
+
+## Guest username. Must be a valid Linux name (^[a-z_][a-z0-9_-]*$) - a dotted
+## Mac username like jane.doe is rejected and Lima silently falls back to `lima`.
+user:
+  name: devuser
+  home: /home/devuser
+
+## Exactly one shared folder, replacing Lima's default (your whole $HOME,
+## read-only).
+mounts:
+  - location: "{{.Home}}/Projects/{{.Param.project}}" # The folder on your laptop
+    mountPoint: "/workspaces/{{.Param.project}}" # The folder on the VM
+    writable: true
+
+## ---------------------------------------------------------------------------
+## Shared defaults - no need to change for normal use.
+## ---------------------------------------------------------------------------
+
+## VM sizing + engine settings (the yaml equivalent of `limactl create` flags
+## --vm-type=vz --mount-type=virtiofs --rosetta --cpus=4 --memory=6 --disk=40).
+## Sized to run alongside another Lima VM on a 16 GB Mac; raise per project
+## with `limactl edit <vm>` if a stack needs more.
+vmType: vz
+mountType: virtiofs
+cpus: 4
+memory: 6GiB
+disk: 40GiB
+vmOpts:
+  vz:
+    rosetta:
+      enabled: true
+      binfmt: true
+
+## Dev-tool provisioning (az, azd, bicep, terraform, aws-cli, gh, node,
+## zsh+oh-my-zsh, ...), kept as idempotent scripts under lima-workflow/provision/
+## so they're editable without recreating the VM. Runs on every `limactl start`.
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      PROVISION_DIR="/workspaces/{{.Param.project}}/{{.Param.repoDir}}/lima-workflow/provision"
+      timeout 30 bash -c "until [ -d \"$PROVISION_DIR\" ]; do sleep 1; done"
+      bash "$PROVISION_DIR/00-system-packages.sh"
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      PROVISION_DIR="/workspaces/{{.Param.project}}/{{.Param.repoDir}}/lima-workflow/provision"
+      timeout 30 bash -c "until [ -d \"$PROVISION_DIR\" ]; do sleep 1; done"
+      for f in 10-user-shell.sh 20-user-tools.sh 30-user-profile.sh; do
+        bash "$PROVISION_DIR/$f"
+      done
