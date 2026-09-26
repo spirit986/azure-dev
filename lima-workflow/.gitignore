@@ -2,7 +2,7 @@
 scratch*
 scratch-*
 
-# For security exclude the working copy of the files
-# Only the example files are commited
+# The working copies belong in each project's ~/Projects/<project>/.limavm/,
+# not here - ignored anyway as a safety net. Only the examples are committed.
 ubuntu24-docker.yaml
 initialize_secrets.sh

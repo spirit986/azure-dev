@@ -2,14 +2,17 @@
 
 Useful for a Mac with an M1+ chip (ARM architecture).
 
-The idea is a dedicated Lima VM with Docker per project, sharing one folder
-with your Mac. You edit on the Mac and run containers and cloud tooling (Azure
-CLI, Bicep, Terraform) inside the VM, which you can create and destroy at will.
+The idea is a dedicated Lima VM with Docker per project, sharing the project
+folder with your Mac. A *project* is everything that belongs to one client or
+task: a folder under `~/Projects` holding any number of repos plus other files.
+The folder itself usually isn't a repo. You edit on the Mac and run containers
+and cloud tooling (Azure CLI, Bicep, Terraform) inside the VM, which you can
+create and destroy at will.
 
 ## How it works
 
-The VM is meant to be disposable. You create your config from
-`ubuntu24-docker.yaml.example`, optionally fill in your secrets from
+The VM is meant to be disposable. You create the project's config from
+`ubuntu24-docker.yaml.example`, optionally fill in its secrets from
 `initialize_secrets.sh.example`, and run the [Quickstart](#0-quickstart).
 
 The provisioning scripts take a few minutes on first boot (about 3–5 min), so
@@ -24,25 +27,41 @@ The VM has its own Docker engine. Use `docker context` to switch the Mac's
 
 ## One template, many projects
 
-Everything in `lima-workflow/` is project-agnostic. Each project gets its own
-VM, created from its own copy of the template. Throughout this README:
+Everything in `lima-workflow/` is project-agnostic, and you keep **one copy**
+of this repo for all your projects. Each project gets its own VM, and its own
+config and secrets in a `.limavm/` folder inside the project folder, so each
+client can have a different GitHub key and git identity. Throughout this
+README:
 
 | placeholder | meaning | Azure workshop example |
 |---|---|---|
 | `myvm` | Lima instance name (`limactl create --name=...`) | `azuredev` |
 | `my-project` | project folder under `~/Projects` (`param.project`) | `azure-workshop` |
 | `devuser` | Linux user inside the VM (`user.name`) | `tomspirit` |
+| `~/Projects/azure-dev` | where this repo is cloned (`param.limaWorkflowDir` points at its `lima-workflow/`) | `~/Projects/azure-workshop/azure-dev` |
 
 ```
-Mac:   ~/Projects/my-project/            shared folder (virtiofs, read-write)
-       ├── azure-dev/                    this repo (param.repoDir)
-       │   └── lima-workflow/            config + provision scripts, read on every boot
-       └── ...                           your project's own repos
-Guest: /workspaces/my-project/           the same folder inside the VM
+Mac                                        Guest (VM)
+~/Projects/my-project/                     /workspaces/          read-write
+├── .limavm/                               ├── .limavm/
+│   ├── ubuntu24-docker.yaml               │     this VM's config
+│   └── initialize_secrets.sh              │     this client's secrets (optional)
+├── repo-a/                                ├── repo-a/
+└── repo-b/                                └── repo-b/
+
+~/Projects/azure-dev/lima-workflow/        /opt/lima-workflow/   read-only
+                                             provision scripts, run on every boot
 ```
 
-This repo has to be cloned *inside* the project folder: the VM reads its
-provision scripts through the shared mount.
+Repos appear directly under `/workspaces`, whether you clone them on the Mac
+or inside the VM. The tools are installed system-wide or into the VM user's
+home, never per repo, so any number of repos can share them.
+
+`lima-workflow` is mounted read-only so nothing running inside the VM can
+change the scripts that run as root on the next boot. Edit them on the Mac.
+
+The azure-dev repo can live anywhere on the Mac, inside a project folder or
+not. `param.limaWorkflowDir` tells each VM where to find it.
 
 A native ARM64 **Ubuntu 24.04** VM, with Rosetta enabled so you can still run
 amd64-only containers at near-native speed. It runs Docker and shares exactly
@@ -77,27 +96,29 @@ anything here doesn't make sense or doesn't work.
 # 1. Prerequisites
 brew install lima docker docker-compose docker-buildx
 softwareupdate --install-rosetta --agree-to-license
-mkdir -p ~/Projects/my-project
 
-# 2. This repo drives the whole setup - clone it into the project folder
-cd ~/Projects/my-project
-git clone git@github.com:spirit986/azure-dev.git
-cd azure-dev/lima-workflow
+# 2. This repo drives the whole setup - clone it once, for all projects
+#    (skip if you already have it)
+git clone git@github.com:spirit986/azure-dev.git ~/Projects/azure-dev
 
-# 3. Your own config + secrets, from the checked-in templates (both gitignored)
-cp ubuntu24-docker.yaml.example ubuntu24-docker.yaml
-cp initialize_secrets.sh.example initialize_secrets.sh   # optional
+# 3. The project's config + secrets, from the checked-in templates
+mkdir -p ~/Projects/my-project/.limavm
+cd ~/Projects/my-project/.limavm
+cp ~/Projects/azure-dev/lima-workflow/ubuntu24-docker.yaml.example ubuntu24-docker.yaml
+cp ~/Projects/azure-dev/lima-workflow/initialize_secrets.sh.example initialize_secrets.sh \
+  && chmod 600 initialize_secrets.sh   # optional
 # now edit both files:
-#  - ubuntu24-docker.yaml: set param.project, param.repoDir and user.name/user.home
-#  - initialize_secrets.sh: your GitHub SSH key + git identity.
-#    NEVER commit this file - it's gitignored on purpose.
+#  - ubuntu24-docker.yaml: set param.project, param.limaWorkflowDir and user.name/user.home
+#  - initialize_secrets.sh: this client's GitHub SSH key + git identity.
+#    NEVER commit this file.
 
-# 4. Create + start the VM (sizing/engine flags are baked into the yaml)
-limactl create --name=myvm ubuntu24-docker.yaml
+# 4. Create + start the VM (sizing/engine flags are baked into the yaml;
+#    the --set strips Lima's default mount of your whole $HOME - see step 3)
+limactl create --name=myvm --set '.mounts |= map(select(.location != "~"))' ubuntu24-docker.yaml
 limactl start myvm
 
 # 5. Verify everything actually provisioned correctly
-./limavm-verify.sh myvm
+~/Projects/azure-dev/lima-workflow/limavm-verify.sh myvm
 # -> per-check "name ... OK/FAIL" lines, then SUCCESS / WARNING / FAILED
 
 # 6. Point your Mac's docker CLI at the VM
@@ -105,7 +126,7 @@ docker context create lima-myvm --docker "host=unix://$HOME/.lima/myvm/sock/dock
 docker context use lima-myvm
 
 # 7. Log in to Azure inside the VM (once per VM - survives restarts)
-limactl shell myvm zsh -ic 'az login --use-device-code'
+limactl shell --workdir /workspaces myvm zsh -ic 'az login --use-device-code'
 ```
 
 If `limavm-verify.sh` prints `SUCCESS`, you're done — jump to
@@ -116,8 +137,22 @@ this setup has already hit once each.
 
 The VM's login shell is `zsh`. To get a shell inside the VM:
 ```bash
-limactl shell myvm zsh
+limactl shell --workdir /workspaces myvm zsh
 ```
+
+`--workdir /workspaces` is there because `limactl shell` otherwise tries to
+`cd` into your current Mac folder inside the VM. Only the project folder is
+shared, so from anywhere else you'd get a harmless
+`cd: /Users/...: No such file or directory` and land in the VM user's home. A
+Mac alias saves the typing:
+```bash
+# ~/.zshrc on the Mac
+alias myvm='limactl shell --workdir /workspaces myvm zsh'
+```
+
+If your GitHub key in `initialize_secrets.sh` has a passphrase, the first
+shell after each VM start asks for it (oh-my-zsh's `ssh-agent` plugin), and
+the key stays unlocked until the VM stops.
 
 ---
 
@@ -139,43 +174,50 @@ Make sure Rosetta is installed on the Mac itself (harmless if it already is):
 softwareupdate --install-rosetta --agree-to-license
 ```
 
-Create the project folder if it doesn't already exist, and clone this repo
-into it. The VM reads its provision scripts *through* the shared mount, so the
-repo has to be there before you create the VM:
+Clone this repo once, if you don't have it yet. Every project's VM reads its
+provision scripts from this one copy through a read-only mount, so it has to
+exist before you create a VM. It can go anywhere; this README assumes
+`~/Projects/azure-dev`:
 
 ```bash
-mkdir -p ~/Projects/my-project
-cd ~/Projects/my-project
-git clone git@github.com:spirit986/azure-dev.git
+git clone git@github.com:spirit986/azure-dev.git ~/Projects/azure-dev
 ```
+
+Because the VM mounts this folder by its Mac path, moving the repo later
+breaks the mount for existing VMs. Update the path with `limactl edit myvm`
+(the second entry under `mounts:`) or recreate the VM.
 
 ---
 
-## 2. Get your own VM config + secrets files
+## 2. Create the project's VM config + secrets files
 
-Two files in `lima-workflow/` are checked in as `*.example` templates only.
-The real, working copies are gitignored because they're machine-specific or
-contain actual credentials:
+Two files are checked in to `lima-workflow/` as `*.example` templates only.
+The working copies belong to the project, not to this repo, so they go in the
+project's `.limavm/` folder. That's how one copy of this repo serves several
+clients, each with its own VM settings, GitHub key and git identity:
 
 ```bash
-cd ~/Projects/my-project/azure-dev/lima-workflow
-cp ubuntu24-docker.yaml.example ubuntu24-docker.yaml
-cp initialize_secrets.sh.example initialize_secrets.sh
+mkdir -p ~/Projects/my-project/.limavm
+cd ~/Projects/my-project/.limavm
+cp ~/Projects/azure-dev/lima-workflow/ubuntu24-docker.yaml.example ubuntu24-docker.yaml
+cp ~/Projects/azure-dev/lima-workflow/initialize_secrets.sh.example initialize_secrets.sh
+chmod 600 initialize_secrets.sh
 ```
 
 **`ubuntu24-docker.yaml`** — the Lima instance template. Everything
 project-specific is in the block at the top:
 
-- `param.project` — the project folder's name under `~/Projects`. It sets
-  both sides of the shared mount: `~/Projects/<project>` on the Mac and
-  `/workspaces/<project>` in the guest. It's also how the provision steps find
-  their scripts, so there's nothing else to keep in sync.
-- `param.repoDir` — the name of this repo's folder inside the project folder
-  (`azure-dev` unless you cloned it under another name).
+- `param.project` — the project folder's name under `~/Projects`. The whole
+  folder is shared with the VM as `/workspaces`.
+- `param.limaWorkflowDir` — where this repo's `lima-workflow/` folder is on
+  the Mac, e.g. `~/Projects/azure-dev/lima-workflow`. It's mounted read-only
+  at `/opt/lima-workflow`, and the provision steps run from there.
 - `user.name` / `user.home` — pick a valid Linux username. Dotted Mac
   usernames (e.g. `jane.doe`) fail Linux's username validation
   (`^[a-z_][a-z0-9_-]*$`), and Lima silently falls back to a generic `lima`
-  account if you don't set this explicitly.
+  account if you don't set this explicitly. `limactl create` still prints a
+  warning about your Mac username (`using lima instead`) even when this is
+  set; that's harmless, and the VM uses the name from the yaml.
 
 Everything else (VM sizing, Rosetta, mount type, provisioning) already has
 sane defaults — you shouldn't need to touch it for normal use.
@@ -191,11 +233,13 @@ commits you make inside the VM are attributed to you. The identity has to be
 set here rather than by hand: a rebuilt VM starts with no `~/.gitconfig`, and
 git refuses to commit without one (`unable to auto-detect email address`).
 
-> ⚠️ **This file holds live credentials in plaintext.** It's already in
-> `.gitignore` — double-check `git status` never shows it before you commit
-> anything in this folder. If you ever suspect it leaked (committed,
-> pasted somewhere, read by a tool you don't trust), rotate the SSH key
-> (and the Terraform token, if you set one) rather than assuming it's fine.
+> ⚠️ **This file holds live credentials in plaintext.** It lives outside this
+> repo on purpose. If the project folder is itself a git repo (a multi-repo
+> checkout), add `.limavm/initialize_secrets.sh` to that repo's `.gitignore`.
+> The VM can read it at `/workspaces/.limavm/`, like everything else in the
+> project folder. If you ever suspect it leaked (committed, pasted somewhere,
+> read by a tool you don't trust), rotate the SSH key (and the Terraform
+> token, if you set one) rather than assuming it's fine.
 
 If you skip this file entirely, the VM still provisions fine. The secrets
 step just no-ops with a note, and `limavm-verify.sh` skips the
@@ -206,11 +250,22 @@ secrets/GitHub-SSH checks instead of failing on them.
 ## 3. Create the Lima instance
 
 ```bash
-limactl create --name=myvm ubuntu24-docker.yaml
+cd ~/Projects/my-project/.limavm
+limactl create --name=myvm --set '.mounts |= map(select(.location != "~"))' ubuntu24-docker.yaml
 limactl start myvm
 ```
 
-That's it — no other flags needed. The VM sizing and engine settings you'd
+> ⚠️ **Don't leave out the `--set`.** `template:docker` (in the yaml's
+> `base:` list) pulls in Lima's default mount of your whole Mac `$HOME`,
+> read-only. Lima merges a base template's list entries into yours, and the
+> yaml has no way to delete one. Without the `--set`, every client VM could
+> read your `~/.ssh` and all your other projects. The filter drops that one
+> entry at create time. The result is frozen into the instance, so it holds
+> across restarts. `limavm-verify.sh` fails its `no other shared folders`
+> check if the mount is there. To fix an existing VM, delete the `~` entry
+> with `limactl edit myvm`.
+
+That's the only extra flag needed. The VM sizing and engine settings you'd
 normally pass to `limactl create` (`--vm-type`, `--mount-type`, `--rosetta`,
 `--cpus`, `--memory`, `--disk`) are already declared in the yaml:
 
@@ -220,7 +275,7 @@ normally pass to `limactl create` (`--vm-type`, `--mount-type`, `--rosetta`,
 | `mountType: virtiofs` | `--mount-type=virtiofs` | Fast, near-native file sharing (vs. the slower default `reverse-sshfs`). |
 | `vmOpts.vz.rosetta.enabled` | `--rosetta` | Enables Rosetta binary translation inside the VM (only works with `vz`), so amd64-only containers run via translation instead of full CPU emulation. |
 | `cpus` / `memory` / `disk` | `--cpus` / `--memory` / `--disk` | 4 vCPU / 6 GiB / 40 GiB — enough for a handful of containers, and small enough to run next to another Lima VM on a 16 GB Mac. The disk is sparse, so it only uses what's written. Change later with `limactl edit myvm` (see the gotcha under [step 11](#11-day-to-day-commands) first). |
-| `mounts:` | `--mount-only ...` | The yaml declares the shared folder directly, fully replacing Lima's default (your whole `$HOME`, read-only) with just this one folder — no `--mount-only` flag needed. |
+| `mounts:` | `--mount-only ...` | The yaml declares the two shared folders directly: the project folder at `/workspaces` (read-write) and `lima-workflow` at `/opt/lima-workflow` (read-only). The `--set` above removes Lima's default `$HOME` mount. |
 
 > ⚠️ **Gotcha: `base:` list order controls which Ubuntu version you actually
 > get, and it's easy to get backwards.** `base: [template:docker,
@@ -237,8 +292,9 @@ normally pass to `limactl create` (`--vm-type`, `--mount-type`, `--rosetta`,
 > `ubuntu-26.04`, and `limavm-verify.sh` checks this too.
 
 To check a config before creating anything, `limactl template validate --fill
-ubuntu24-docker.yaml` prints the fully resolved yaml. The `mounts:` and
-provision `PROVISION_DIR=` lines show exactly what your params expand to.
+ubuntu24-docker.yaml` prints the fully resolved yaml. The `mounts:` lines show
+exactly what your params expand to. They also include the inherited `$HOME`
+entry, because `validate` doesn't apply the `--set`.
 
 First boot takes a few minutes — it's downloading the base image, installing
 Docker, and running everything under `lima-workflow/provision/`.
@@ -248,19 +304,19 @@ Docker, and running everything under `lima-workflow/provision/`.
 ## 4. Verify provisioning succeeded
 
 Don't just eyeball it — run the check script, which exercises everything the
-provisioning is supposed to have set up (OS version, shared mount, system
+provisioning is supposed to have set up (OS version, shared mounts, system
 packages, zsh/oh-my-zsh, Terraform, node, the Azure/AWS CLIs, Bicep, Claude
 Code, secrets if configured, and Docker itself):
 
 ```bash
-./limavm-verify.sh myvm
+~/Projects/azure-dev/lima-workflow/limavm-verify.sh myvm
 ```
 
 Every check reports itself as it runs, then the script prints a verdict:
 
 ```
 ubuntu 24.04 guest           ... OK
-provision dir on virtiofs    ... OK
+project mount /workspaces    ... OK
 ...
 zsh theme (edvardm)          ... FAIL
 ...
@@ -272,14 +328,18 @@ zsh theme (edvardm)          ... FAILED see provision/10-user-shell.sh (.zshrc Z
 | verdict | meaning | exit |
 |---|---|---|
 | `SUCCESS` | every check passed — the VM is genuinely ready to use | 0 |
-| `WARNING` | 1–2 checks failed; usually one provisioning step to re-run | 1 |
+| `WARNING` | 1–2 checks failed, usually one provisioning step to re-run — or a check reported `WARN` because it can't be confirmed yet (see below) | 1 |
 | `FAILED` | 3+ checks failed; the provisioning run likely broke early and took later steps down with it | 2 |
 | `ERROR` | the checks couldn't run at all (no such instance, not running, bad usage) | 3 |
 
 It runs all checks rather than stopping at the first failure, so you see the
 whole picture at once: a failure early in provisioning usually breaks several
 later things too. `SKIP` is not a failure (see the
-[secrets note](#troubleshooting)).
+[secrets note](#troubleshooting)). `WARN` isn't a provisioning failure
+either, but the check couldn't be confirmed: currently only
+`github ssh authenticates`, when your GitHub key has a passphrase that hasn't
+been entered yet. Unlock it with `ssh-add` in a VM shell and re-run to get
+`SUCCESS`.
 
 The `see <...>` pointer names the general area — which `provision/*.sh`
 script, or which config — rather than a full diagnosis; treat it as a starting
@@ -303,7 +363,7 @@ The VM has no browser, so use the device-code flow. It prints a URL and a
 code, which you open and enter in the browser on your Mac:
 
 ```bash
-limactl shell myvm zsh
+limactl shell --workdir /workspaces myvm zsh
 az login --use-device-code
 # a specific tenant (e.g. a workshop/customer tenant rather than your home one):
 az login --tenant <tenant-id-or-domain> --use-device-code
@@ -385,34 +445,45 @@ touch ~/Projects/my-project/hello-from-mac.txt
 
 Inside the VM:
 ```bash
-limactl shell myvm
-ls /workspaces/my-project
+limactl shell --workdir /workspaces myvm
+ls /workspaces
 ```
 
 Lima's default is to mirror the exact host path (e.g.
-`/Users/you/Projects/my-project`). This setup instead mounts the shared
-folder at a clean, host-independent guest path, `/workspaces/<project>`, which
-matches the convention VS Code's Dev Containers extension already uses.
+`/Users/you/Projects/my-project`). This setup instead mounts the project
+folder at a clean, host-independent guest path, `/workspaces`, which matches
+the convention VS Code's Dev Containers extension already uses. There's one
+project per VM, so its repos sit directly under `/workspaces`.
 **Consequence:** any `docker-compose.yml` using *absolute* bind-mount paths
-needs to target `/workspaces/my-project/...` under this VM, not the host path.
+needs to target `/workspaces/<repo>/...` under this VM, not the host path.
 Relative bind mounts (`./data:/app/data`) are unaffected either way.
 
 ---
 
 ## 8. Clone your project repos and run them
 
-Clone straight into the project folder from the Mac side:
+Clone into the project folder from either side; the repo shows up on both.
+
+From the Mac:
 
 ```bash
 cd ~/Projects/my-project
 git clone git@github.com:your-org/service-a.git
 ```
 
+Or from inside the VM, using the SSH key from `initialize_secrets.sh`:
+
+```bash
+limactl shell --workdir /workspaces myvm
+cd /workspaces
+git clone git@github.com:your-org/service-a.git
+```
+
 Run the stack from inside the VM:
 
 ```bash
-limactl shell myvm
-cd /workspaces/my-project/service-a
+limactl shell --workdir /workspaces myvm
+cd /workspaces/service-a
 docker compose up
 ```
 
@@ -474,23 +545,26 @@ of whatever your global `docker context` is set to), add this to that repo's
 limactl list                   # show all instances and their status
 limactl stop myvm              # stop the VM (frees RAM/CPU)
 limactl start myvm             # start it again (re-runs provisioning)
-limactl shell myvm             # shell into the Ubuntu VM
+limactl shell --workdir /workspaces myvm   # shell into the Ubuntu VM
 limactl edit myvm              # change cpus/memory/mounts on an *existing* instance
 limactl delete myvm            # nuke it and start over
-./limavm-verify.sh myvm        # confirm provisioning actually succeeded
+~/Projects/azure-dev/lima-workflow/limavm-verify.sh myvm   # confirm provisioning actually succeeded
 ```
 
-> ⚠️ **Editing `ubuntu24-docker.yaml` after the instance already
+> ⚠️ **Editing `.limavm/ubuntu24-docker.yaml` after the instance already
 > exists does nothing by itself.** Lima freezes the config into
 > `~/.lima/myvm/lima.yaml` at `limactl create` time and doesn't re-read the
 > source file on `limactl start`. To apply yaml changes (new mount, resized
 > disk, tweaked provisioning) to an *existing* instance, use
 > `limactl edit myvm` (which edits that frozen copy) — or just
-> `limactl delete myvm` and recreate from the updated file. Changes to the
+> `limactl delete myvm` and recreate from the updated file (with the same
+> `--set` as in [step 3](#3-create-the-lima-instance)). Changes to the
 > `provision/*.sh` scripts themselves are the exception: since they're
-> re-read from the shared mount on every `limactl start`, editing those files
-> directly and running `limactl stop myvm && limactl start myvm` is
-> enough — no recreate needed.
+> re-read from `/opt/lima-workflow` on every `limactl start`, editing those
+> files on the Mac and running `limactl stop myvm && limactl start myvm` is
+> enough — no recreate needed. The same goes for
+> `.limavm/initialize_secrets.sh`. Script changes reach every project's VM
+> at its next restart, because they all share this one copy.
 
 ---
 
@@ -536,13 +610,13 @@ These are installed but do nothing until you use them:
 ### Monitoring the progress while the VM is booting
 ```bash
 # Live, detailed view — our provision scripts run with set -x, so every command shows up here:
-limactl shell myvm -- sudo tail -f /var/log/cloud-init-output.log
+limactl shell --workdir /workspaces myvm -- sudo tail -f /var/log/cloud-init-output.log
 
 # Just block until it's done, then check:
-limactl shell myvm -- cloud-init status --wait   # prints dots, then "status: done"
+limactl shell --workdir /workspaces myvm -- cloud-init status --wait   # prints dots, then "status: done"
 
 # The limavm-verify.sh script
-cd lima-workflow && ./limavm-verify.sh myvm
+~/Projects/azure-dev/lima-workflow/limavm-verify.sh myvm
 ```
 
 Host-side view of Lima's own orchestration
@@ -556,17 +630,22 @@ tail -f ~/.lima/myvm/ha.stderr.log
 
 - **Provisioning times out waiting for the provision directory** — the
   first line of each provision step waits 30 s for
-  `/workspaces/<project>/<repoDir>/lima-workflow/provision`. If it never
-  appears, `param.project` / `param.repoDir` don't match where the repo
-  actually is on the Mac. Check with
-  `limactl template validate --fill ubuntu24-docker.yaml`, then fix it with
-  `limactl edit myvm` or recreate the VM.
+  `/opt/lima-workflow/provision`. If it never appears,
+  `param.limaWorkflowDir` doesn't match where the repo actually is on the Mac
+  (or the repo was moved after the VM was created). Check with
+  `limactl list myvm --format '{{range .Config.Mounts}}{{.Location}} -> {{.MountPoint}}{{"\n"}}{{end}}'`,
+  then fix it with `limactl edit myvm` or recreate the VM.
+- **`no other shared folders` fails in `limavm-verify.sh`** — the VM was
+  created without the `--set` from [step 3](#3-create-the-lima-instance), so
+  your whole `$HOME` is mounted read-only. `limactl stop myvm`, then
+  `limactl edit myvm` and delete the `- location: "~"` entry under `mounts:`.
 - **`limactl create` downloaded Ubuntu 26.04 instead of 24.04** — see the
   `base:` order gotcha in [step 3](#3-create-the-lima-instance). Fix the
   order, `limactl delete myvm`, and recreate.
 - **Mount not showing up in the guest** — re-check with `limactl shell myvm`
   then `mount | grep virtiofs`. If missing, `limactl edit myvm` and confirm
-  the mount is listed under `mounts:` with `writable: true`.
+  both mounts are listed under `mounts:`: `/workspaces` with
+  `writable: true`, `/opt/lima-workflow` with `writable: false`.
 - **`az login` opens nothing / hangs** — use `--use-device-code`; the VM has
   no browser to redirect to.
 - **`docker` commands hang or timeout** — make sure `lima-myvm` is actually
@@ -634,7 +713,13 @@ tail -f ~/.lima/myvm/ha.stderr.log
   `initialize_secrets.sh`; if you created that file before this was added to
   the template, copy the `## Setup Git identity` block out of
   `initialize_secrets.sh.example` into it.
+- **`github ssh authenticates ... WARN` in `limavm-verify.sh`** — your
+  GitHub key has a passphrase and isn't unlocked yet. GitHub recognises the
+  key, so provisioning did its part, but login can't be confirmed until the
+  passphrase is entered, and the script can't type it for you. Open a VM shell
+  (it asks for the passphrase) or run `ssh-add` there, then re-run the script.
+  The verdict is `WARNING` until then.
 - **Secrets/GitHub-SSH checks report `SKIP` in `limavm-verify.sh`** — expected
   if you haven't created `initialize_secrets.sh` yet (see
-  [step 2](#2-get-your-own-vm-config--secrets-files)); `SKIP` is not a failure
+  [step 2](#2-create-the-projects-vm-config--secrets-files)); `SKIP` is not a failure
   and doesn't count towards the `WARNING`/`FAILED` verdict.

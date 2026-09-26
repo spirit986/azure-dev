@@ -48,3 +48,47 @@ initialize_secrets.sh
 Scratches/*
 *.claudeconv.*
 .vscode/*
+
+
+# --- Keys and secrets: never commit ------------------------------------------
+# Per-client VM config + secrets belong in ~/Projects/<project>/.limavm/, not
+# here; ignored anyway in case one is copied in by mistake.
+.limavm/
+ubuntu24-docker.yaml
+
+# SSH private keys (the .pub halves are harmless, but keep them out too)
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+*.ppk
+
+# TLS / signing keys, certificate bundles and keystores. If a repo genuinely
+# needs a public CA cert, re-include it with a `!path/to/ca.pem` line below.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.kdbx
+
+# Environment and credential files
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+credentials
+credentials.json
+credentials.tfrc.json
+*.publishsettings
+*.azureauth
+.azure/
+.aws/
+.ssh/
+
+# Terraform plan files can hold secrets in plaintext
+*.tfplan
+tfplan

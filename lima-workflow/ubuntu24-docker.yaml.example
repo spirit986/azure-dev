@@ -3,24 +3,31 @@ base:
   - template:docker
 
 ## ---------------------------------------------------------------------------
-## Per-project settings - the only part you normally edit. One VM per project:
-## copy this file to ubuntu24-docker.yaml and set `param` + `user`.
+## Per-project settings - the only part you normally edit. One VM per project
+## (client): copy this file to ~/Projects/<project>/.limavm/ubuntu24-docker.yaml
+## and set `param` + `user`.
 ##
-##   Mac:   ~/Projects/<project>/            shared folder (virtiofs)
-##          ├── <repoDir>/lima-workflow/     this repo; provision scripts are
-##          │                                read from here on every boot
-##          └── ...                          your project's own repos
-##   Guest: /workspaces/<project>/           the same folder inside the VM
+##   Mac:   ~/Projects/<project>/            project folder: any number of repos
+##          ├── .limavm/                     this VM's config + secrets
+##          ├── repo-a/
+##          └── repo-b/
+##   Guest: /workspaces/                     the same folder (read-write)
+##          ├── repo-a/
+##          └── repo-b/
+##
+##   Mac:   <limaWorkflowDir>                the one shared copy of lima-workflow
+##   Guest: /opt/lima-workflow/              the same folder (read-only);
+##                                           provision scripts run from here
 ## ---------------------------------------------------------------------------
 
 ## `{{.Param.*}}` values are resolved everywhere they're referenced below
 ## (mounts, provision scripts), so each is set only here.
-##   project - folder name under ~/Projects on the Mac; also the guest path
-##             /workspaces/<project>
-##   repoDir - folder name of this repo inside that folder
+##   project         - folder name under ~/Projects on the Mac
+##   limaWorkflowDir - where the lima-workflow folder of the azure-dev repo is
+##                     on the Mac; `~` is expanded
 param:
   project: "my-project"
-  repoDir: "azure-dev"
+  limaWorkflowDir: "~/Projects/azure-dev/lima-workflow"
 
 ## Guest username. Must be a valid Linux name (^[a-z_][a-z0-9_-]*$) - a dotted
 ## Mac username like jane.doe is rejected and Lima silently falls back to `lima`.
@@ -28,16 +35,28 @@ user:
   name: devuser
   home: /home/devuser
 
-## Exactly one shared folder, replacing Lima's default (your whole $HOME,
-## read-only).
-mounts:
-  - location: "{{.Home}}/Projects/{{.Param.project}}" # The folder on your laptop
-    mountPoint: "/workspaces/{{.Param.project}}" # The folder on the VM
-    writable: true
-
 ## ---------------------------------------------------------------------------
 ## Shared defaults - no need to change for normal use.
 ## ---------------------------------------------------------------------------
+
+## The two shared folders. The guest paths are fixed: the provision scripts
+## and limavm-verify.sh rely on /workspaces and /opt/lima-workflow.
+## lima-workflow is read-only so nothing inside the VM can change the scripts
+## that run as root on the next boot; edit them on the Mac.
+##
+## ⚠️ `template:docker` also brings in Lima's default mount of your whole $HOME
+## (read-only), and a base template's list entries can't be removed from here.
+## Strip it when creating the VM:
+##   limactl create --name=<vm> --set '.mounts |= map(select(.location != "~"))' ubuntu24-docker.yaml
+## Otherwise every client VM can read ~/.ssh and all your other projects.
+## limavm-verify.sh fails if any other mount is present.
+mounts:
+  - location: "{{.Home}}/Projects/{{.Param.project}}"
+    mountPoint: "/workspaces"
+    writable: true
+  - location: "{{.Param.limaWorkflowDir}}"
+    mountPoint: "/opt/lima-workflow"
+    writable: false
 
 ## VM sizing + engine settings (the yaml equivalent of `limactl create` flags
 ## --vm-type=vz --mount-type=virtiofs --rosetta --cpus=4 --memory=6 --disk=40).
@@ -57,12 +76,13 @@ vmOpts:
 ## Dev-tool provisioning (az, azd, bicep, terraform, aws-cli, gh, node,
 ## zsh+oh-my-zsh, ...), kept as idempotent scripts under lima-workflow/provision/
 ## so they're editable without recreating the VM. Runs on every `limactl start`.
+## Tools are installed system-wide or into the user's home, never per repo.
 provision:
   - mode: system
     script: |
       #!/bin/bash
       set -eux -o pipefail
-      PROVISION_DIR="/workspaces/{{.Param.project}}/{{.Param.repoDir}}/lima-workflow/provision"
+      PROVISION_DIR="/opt/lima-workflow/provision"
       timeout 30 bash -c "until [ -d \"$PROVISION_DIR\" ]; do sleep 1; done"
       bash "$PROVISION_DIR/00-system-packages.sh"
 
@@ -70,7 +90,7 @@ provision:
     script: |
       #!/bin/bash
       set -eux -o pipefail
-      PROVISION_DIR="/workspaces/{{.Param.project}}/{{.Param.repoDir}}/lima-workflow/provision"
+      PROVISION_DIR="/opt/lima-workflow/provision"
       timeout 30 bash -c "until [ -d \"$PROVISION_DIR\" ]; do sleep 1; done"
       for f in 10-user-shell.sh 20-user-tools.sh 30-user-profile.sh; do
         bash "$PROVISION_DIR/$f"
