@@ -41,7 +41,8 @@ apt-get install -y --no-install-recommends \
   python3-venv \
   pipx \
   direnv \
-  openssl
+  openssl \
+  mc 
 
 locale-gen en_US.UTF-8
 
